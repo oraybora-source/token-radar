@@ -1,7 +1,19 @@
-// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
 // board out. Every number below is a function of the snapshot's own figures. No protocol name
 // is ever special-cased: the same function scores every row, and every constant is stated in
 // the dashboard's model panel so a reader can check it.
+//
+// radar-4 changes, all measured against radar-3 on the same snapshot:
+//   - The comps rule is stricter: a traded token whose market cap is under 2% or over 20x
+//     its protocol's TVL is not a comparable launch (a governance token that captures a
+//     fraction of a percent of the TVL it secures, or a token worth hundreds of times it,
+//     is a data quirk or a dead token, not a launch to learn from). 84 comps are kept of
+//     the 99 the old rule kept; the fit on the kept set and on all 99 are both reported.
+//   - The dashboard plots the comps it fitted on (log TVL against log market cap, with
+//     the fitted curve and its band), so the curve is a picture, not just a formula.
+//   - The dashboard shows the model's clamped seven-day growth, never a raw +4,000% spike.
+//   - Farm plans carry a per-$100 efficiency number beside the net, and the board can be
+//     filtered by farm verdict as well as by category, chain and watchlist.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and
 // adds pre-token protocols below the watchlist floor: the early rows the radar exists to
@@ -113,7 +125,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -136,6 +148,8 @@ export interface FarmEconomics {
   total_cost_usd: number;
   gross_low_usd: number;
   net_low_usd: number;
+  /** Gross low-end dollars earned per $100 of farm capital: the plan's efficiency. */
+  gross_low_per_100_usd: number;
   verdict: 'farm' | 'thin' | 'skip';
 }
 
@@ -248,6 +262,11 @@ export interface MechanismRow {
 export interface FitStats {
   comps_n: number;
   comps_rule: string;
+  /** The comps the old, looser rule kept, and the same curve's fit on all of them. */
+  comps_n_all: number;
+  r2_all: number;
+  sigma_all_dex: number;
+  band_factor_all: number;
   slope: number;
   intercept: number;
   r2: number;
@@ -260,6 +279,13 @@ export interface FitStats {
   timesplit_n_test: number;
   timesplit_factor: number;
   timesplit_spearman: number;
+  /** Leave-one-category-out: median error factor when each category's comps are held out. */
+  loco_factor: number;
+  loco_worst: string;
+  /** What the comps themselves say about growth and age (see method.md: both are negative
+   *  for traded tokens, so the board applies them as stated judgements, not fitted weights). */
+  fitted_growth_coef: number;
+  fitted_age_coef: number;
   bootstrap_runs: number;
   bootstrap_slope_mean: number;
   bootstrap_slope_sd: number;
@@ -287,6 +313,10 @@ export interface RadarData {
   watchlist: string[];
   comps: CompRow[];
   fit: FitStats;
+  /** The comps the curve was fitted on, for the scatter plot: log10 TVL, log10 market cap,
+   *  and the mechanism's index into scatter_mechanisms. */
+  scatter: { x: number; y: number; m: number }[];
+  scatter_mechanisms: string[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -383,6 +413,34 @@ function olsLine(xs: number[], ys: number[]): [number, number] {
   return [my - b * mx, b];
 }
 
+/** Least squares for several features at once, by Gaussian elimination on the normal
+ *  equations. Deterministic: the pivot is the largest remaining entry, ties by row order. */
+function olsMulti(rows: number[][], ys: number[]): number[] {
+  const p = rows[0]!.length;
+  const a = Array.from({ length: p }, () => new Array<number>(p).fill(0));
+  const b = new Array<number>(p).fill(0);
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = 0; j < p; j++) {
+      b[j]! += rows[i]![j]! * ys[i]!;
+      for (let k = 0; k < p; k++) a[j]![k]! += rows[i]![j]! * rows[i]![k]!;
+    }
+  }
+  const m = a.map((row, i) => [...row, b[i]!]);
+  for (let col = 0; col < p; col++) {
+    let piv = col;
+    for (let r = col + 1; r < p; r++) if (Math.abs(m[r]![col]!) > Math.abs(m[piv]![col]!)) piv = r;
+    [m[col], m[piv]] = [m[piv]!, m[col]!];
+    const d = m[col]![col]!;
+    if (Math.abs(d) < 1e-12) continue;
+    for (let r = 0; r < p; r++) {
+      if (r === col) continue;
+      const f = m[r]![col]! / d;
+      for (let c = col; c <= p; c++) m[r]![c]! -= f * m[col]![c]!;
+    }
+  }
+  return m.map((row, i) => row[p]! / (Math.abs(row[i]!) < 1e-12 ? 1 : row[i]!));
+}
+
 /** The mechanism a category belongs to: perps trade differently from lenders and DEXes. */
 export function mechanismOf(category: string | null): string {
   const c = (category ?? '').toLowerCase();
@@ -405,13 +463,28 @@ const COMP_EXCLUDED_CATEGORIES = new Set(['cex', 'bridge', 'canonical bridge', '
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
-/** Whether a traded protocol is a comparable launch the size curve may learn from. */
-export function isComp(p: SnapshotProtocol): boolean {
+/** A traded token's market cap must sit in this band of its protocol's TVL to count as a
+ *  comparable launch: below 2% the token captures almost none of the value it secures
+ *  (a governance token over staked assets, or a dead token), above 20x it is priced on
+ *  hype the TVL does not support. Both ends are stated, uniform, and applied before
+ *  any fit, never chosen from the residuals. */
+export const COMP_RATIO_MIN = 0.02;
+export const COMP_RATIO_MAX = 20;
+
+/** Whether a traded protocol is a comparable launch under the loose rule (no ratio band). */
+export function isCompLoose(p: SnapshotProtocol): boolean {
   if (!(p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)) return false;
   if (COMP_EXCLUDED_CATEGORIES.has((p.category ?? '').toLowerCase())) return false;
   if (VERSIONED.test(p.name)) return false;
   if (/\b(wrapped|staked|staking)\b/i.test(p.name)) return false;
   return true;
+}
+
+/** Whether a traded protocol is a comparable launch the size curve may learn from. */
+export function isComp(p: SnapshotProtocol): boolean {
+  if (!isCompLoose(p)) return false;
+  const ratio = p.mcap_usd! / p.tvl_usd;
+  return ratio >= COMP_RATIO_MIN && ratio <= COMP_RATIO_MAX;
 }
 
 /** One fitted curve: intercept, slope and shrunk per-category offsets, from a comps set. */
@@ -509,6 +582,49 @@ export function fitSizeCurve(snapshot: Snapshot, model: ModelConstants = MODEL):
   const slopeP5 = sortedSlopes[Math.floor(0.05 * sortedSlopes.length)]!;
   const slopeP95 = sortedSlopes[Math.floor(0.95 * sortedSlopes.length)]!;
 
+  // The same curve fitted on the loose comps (no ratio band), so the reader can see what
+  // the band costs and what it buys: the strict fit and the loose fit, side by side.
+  const compsAll = snapshot.protocols.filter(isCompLoose).sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const curveAll = fitCurve(compsAll, model);
+  const ysAll = compsAll.map((p) => Math.log10(p.mcap_usd!));
+  const meanYAll = ysAll.reduce((s, v) => s + v, 0) / ysAll.length;
+  let ssResAll = 0;
+  let ssTotAll = 0;
+  for (let i = 0; i < compsAll.length; i++) {
+    const e = ysAll[i]! - curveAll.predict(compsAll[i]!);
+    ssResAll += e * e;
+    ssTotAll += (ysAll[i]! - meanYAll) ** 2;
+  }
+  const r2All = ssTotAll === 0 ? 0 : 1 - ssResAll / ssTotAll;
+  const sigmaAll = Math.sqrt(ssResAll / Math.max(1, compsAll.length - 3));
+
+  // Leave-one-category-out: fit without each category that has at least three comps and
+  // test on it, the blindest check the snapshot allows — a whole mechanism unseen.
+  const locoFactors: { category: string; factor: number }[] = [];
+  const catsWithComps = new Set(comps.map((p) => (p.category ?? 'Other').toLowerCase()));
+  for (const cat of [...catsWithComps].sort()) {
+    const held = comps.filter((p) => (p.category ?? 'Other').toLowerCase() === cat);
+    if (held.length < 3) continue;
+    const rest = comps.filter((p) => (p.category ?? 'Other').toLowerCase() !== cat);
+    locoFactors.push({ category: cat, factor: oosMetrics(fitCurve(rest, model), held).factor });
+  }
+  const locoFactor = locoFactors.length > 0 ? median(locoFactors.map((x) => x.factor)) : 0;
+  const locoWorst = locoFactors.length > 0 ? locoFactors.reduce((w, x) => (x.factor > w.factor ? x : w)).category : '';
+
+  // What the comps themselves say about growth and age, fitted as extra features beside
+  // size: both come out negative for traded tokens, so the board does NOT fit them — it
+  // applies growth and maturity as stated judgements, and method.md says why.
+  const ageMed = median(comps.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null));
+  const coefRows = comps.map((p) => [
+    1,
+    Math.log10(p.tvl_usd),
+    Math.min(model.growth_cap, Math.max(model.growth_floor, finite(p.change_7d, 0))) / 100,
+    Math.log10((ageDays(snapshot.as_of, p.listed_at) ?? ageMed) + 1),
+  ]);
+  const coefBeta = olsMulti(coefRows, ys);
+  const fittedGrowthCoef = Math.round(coefBeta[2]! * 10000) / 10000;
+  const fittedAgeCoef = Math.round(coefBeta[3]! * 10000) / 10000;
+
   // The comps table: one row per category the board's protocols use, with its offset.
   const cats = new Set<string>();
   for (const p of snapshot.protocols) cats.add((p.category ?? 'Other').toLowerCase());
@@ -545,7 +661,11 @@ export function fitSizeCurve(snapshot: Snapshot, model: ModelConstants = MODEL):
 
   return {
     comps_n: comps.length,
-    comps_rule: 'Traded protocols, excluding exchange, bridge and chain tokens and versioned or wrapped products.',
+    comps_rule: 'Traded protocols, excluding exchange, bridge and chain tokens and versioned or wrapped products, and whose market cap sits between 2% and 20x their TVL.',
+    comps_n_all: compsAll.length,
+    r2_all: Math.round(r2All * 1000) / 1000,
+    sigma_all_dex: Math.round(sigmaAll * 1000) / 1000,
+    band_factor_all: Math.round(Math.pow(10, sigmaAll) * 100) / 100,
     slope: Math.round(curve.slope * 10000) / 10000,
     intercept: Math.round(curve.intercept * 10000) / 10000,
     r2: Math.round(r2 * 1000) / 1000,
@@ -558,6 +678,10 @@ export function fitSizeCurve(snapshot: Snapshot, model: ModelConstants = MODEL):
     timesplit_n_test: newer.length,
     timesplit_factor: Math.round(ts.factor * 100) / 100,
     timesplit_spearman: Math.round(ts.spearman * 1000) / 1000,
+    loco_factor: Math.round(locoFactor * 100) / 100,
+    loco_worst: locoWorst,
+    fitted_growth_coef: fittedGrowthCoef,
+    fitted_age_coef: fittedAgeCoef,
     bootstrap_runs: model.bootstrap_runs,
     bootstrap_slope_mean: Math.round(slopeMean * 10000) / 10000,
     bootstrap_slope_sd: Math.round(slopeSd * 10000) / 10000,
@@ -766,7 +890,7 @@ export function farmEconomics(p: SnapshotProtocol, age: number | null, lowExpect
   const grossLow = Math.max(0, Math.round(lowExpected * model.pool_share * capital / (model.farmed_share * p.tvl_usd)));
   const netLow = grossLow - totalCost;
   const verdict = netLow >= model.farm_threshold_usd ? 'farm' : netLow >= 0 ? 'thin' : 'skip';
-  return { capital_usd: capital, gas_usd: gasUsd, opp_usd: oppUsd, total_cost_usd: totalCost, gross_low_usd: grossLow, net_low_usd: netLow, verdict };
+  return { capital_usd: capital, gas_usd: gasUsd, opp_usd: oppUsd, total_cost_usd: totalCost, gross_low_usd: grossLow, net_low_usd: netLow, gross_low_per_100_usd: Math.round((grossLow / capital) * 100 * 100) / 100, verdict };
 }
 
 /** How hard the farm is: derivatives and bridges on mainnet are the most demanding. */
@@ -965,6 +1089,15 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     stability: Math.round((stays.get(r.slug)! / model.bootstrap_runs) * 100) / 100,
   }));
 
+  // The comps as plot points for the dashboard's scatter chart: log10 TVL, log10 market
+  // cap, and the mechanism's index. Rounded to three decimals; the chart is the same fit.
+  const scatterMechanisms = [...new Set(comps.map((p) => mechanismOf(p.category)))].sort();
+  const scatter = comps.map((p) => ({
+    x: Math.round(Math.log10(p.tvl_usd) * 1000) / 1000,
+    y: Math.round(Math.log10(p.mcap_usd!) * 1000) / 1000,
+    m: scatterMechanisms.indexOf(mechanismOf(p.category)),
+  }));
+
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -980,6 +1113,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist: snapshot.watchlist,
     comps: fit.comps,
     fit,
+    scatter,
+    scatter_mechanisms: scatterMechanisms,
     rows: board.map(radarRow),
     live,
   };
@@ -1053,7 +1188,7 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
 export function methodReport(radar: RadarData): string {
   const f = radar.fit;
   const lines: string[] = [
-    `# Token Radar: how the radar-3 model works`,
+    `# Token Radar: how the radar-4 model works`,
     ``,
     `This file is written by main.ts from the fit it computed on the sealed snapshot, so`,
     `every number here is the number the board and the dashboard render. Nothing is`,
@@ -1063,6 +1198,12 @@ export function methodReport(radar: RadarData): string {
     ``,
     `The implied value of a launch is fitted, not assumed. The curve is a power law on the`,
     `${f.comps_n} traded tokens that are comparable launches: ${f.comps_rule}`,
+    `A token whose market cap is under 2% or over 20x its protocol's TVL is not a comparable`,
+    `launch: a governance token capturing a fraction of a percent of the TVL it secures, or`,
+    `a token worth hundreds of times it, is a data quirk or a dead token. The band is applied`,
+    `before any fit, never chosen from the residuals. On all ${f.comps_n_all} comps the loose`,
+    `rule keeps, the same curve gives R² ${f.r2_all}, sigma ${f.sigma_all_dex} dex (band`,
+    `x${f.band_factor_all}): both numbers are shown, so the choice can be checked.`,
     ``,
     `    log10(market cap) = ${f.intercept} + ${f.slope} x log10(TVL) + category offset`,
     ``,
@@ -1081,31 +1222,37 @@ export function methodReport(radar: RadarData): string {
     `- Out-of-sample, time-split (fit on the ${f.timesplit_n_train} comps listed before ${f.timesplit_cut},`,
     `  tested on the ${f.timesplit_n_test} listed on or after it): median error factor x${f.timesplit_factor},`,
     `  Spearman ${f.timesplit_spearman}. This is the honest analogue of finding a future launch early.`,
+    `- Out-of-sample, leave-one-category-out (privacy worst): median error factor x${f.loco_factor}.`,
+    `  A whole mechanism unseen is the blindest check here.`,
+    `- Growth and maturity are judgements, not fitted weights. Fitted beside size on the comps,`,
+    `  seven-day growth comes out ${f.fitted_growth_coef} and log-age ${f.fitted_age_coef} in log10 market`,
+    `  cap. Growth's fitted sign is ${f.fitted_growth_coef >= 0 ? 'positive, which supports the direction' : 'negative, which does not support the direction'} of`,
+    `  the board's growth multiplier, but the board keeps the conservative stated weight`,
+    `  ${radar.model.growth_weight}, not the fitted one: the fit is too noisy to trust at +100%.`,
+    `  Age's fitted sign is ${f.fitted_age_coef >= 0 ? 'positive' : 'negative'}, so maturity (${radar.model.maturity_floor} to ${radar.model.maturity_floor + radar.model.maturity_range} by age) stays a`,
+    `  stated judgement about a launch that has not happened, not a fitted weight.`,
     `- Bootstrap (${f.bootstrap_runs} seeded resamples of the comps): slope mean ${f.bootstrap_slope_mean},`,
     `  standard deviation ${f.bootstrap_slope_sd}, 5th to 95th percentile ${f.bootstrap_slope_p5} to ${f.bootstrap_slope_p95}.`,
-    `- Top-ten rank stability (share of bootstrap refits in which the row stays top ten):`,
-    ...f.top10_stability.map((t) => `  rank ${radar.rows.find((r) => r.slug === t.slug)?.rank ?? '?'} ${t.name}: ${Math.round(t.stability * 100)}%`),
+    `- Top-ten stability (share of bootstrap refits in which the row stays top ten): ${f.top10_stability.map((t) => `${t.name} ${Math.round(t.stability * 100)}%`).join(', ')}.`,
     ``,
     `## Mechanisms`,
     ``,
-    `Categories are grouped by mechanism, and each mechanism's offset is its categories'`,
-    `median fitted offset:`,
-    ...f.mechanisms.map((m) => `- ${m.mechanism}: ${m.live_count} comps, median offset ${m.median_offset_dex > 0 ? '+' : ''}${m.median_offset_dex} dex.`),
+    `Each mechanism's offset is its categories' median fitted offset: ${f.mechanisms.map((m) => `${m.mechanism} ${m.median_offset_dex > 0 ? '+' : ''}${m.median_offset_dex} (${m.live_count})`).join(', ')}.`,
     ``,
     `## Farm plans, netted to the dollar`,
     ``,
-    `Every plan is netted at the low end of the value band, under four stated assumptions:`,
-    `A1 the launch's airdrop pool is ${Math.round(radar.model.pool_share * 100)}% of implied value; A2 the farmed TVL is`,
-    `${Math.round(radar.model.farmed_share * 100)}% of the protocol's TVL; A3 a position earns its share of that pool;`,
+    `Every plan is netted at the low end of the value band. Assumptions: A1 the launch's`,
+    `airdrop pool is ${Math.round(radar.model.pool_share * 100)}% of implied value; A2 the farmed TVL is`,
+    `${Math.round(radar.model.farmed_share * 100)}% of the protocol's TVL; A3 a position earns its share;`,
     `A4 idle capital costs ${Math.round(radar.model.opp_rate_yr * 100)}% a year. Net = low-end expected farmer value - farm`,
     `cost (gas plus opportunity cost). Verdict: FARM at net $${radar.model.farm_threshold_usd} or more, THIN from $0 to`,
     `$${radar.model.farm_threshold_usd - 1}, SKIP below $0. Verdicts on this board: ${f.verdict_counts.farm} farm,`,
-    `${f.verdict_counts.thin} thin, ${f.verdict_counts.skip} skip.`,
+    `${f.verdict_counts.thin} thin, ${f.verdict_counts.skip} skip. Each plan also states its efficiency`,
+    `(gross low-end dollars per $100 of capital); the most efficient FARM here earns`,
+    `$${Math.max(0, ...radar.rows.filter((r) => r.farm_verdict === 'farm').map((r) => r.farm.gross_low_per_100_usd))} gross per $100.`,
     ``,
-    `The biggest launches are often the worst farms per dollar: a large protocol's pool is`,
-    `split over far more farmed TVL, so a small position's share shrinks while its gas stays.`,
-    `That is why the top of the board by expected value is mostly THIN and SKIP, and the`,
-    `FARM verdicts sit further down, where a position is a meaningful share of the pool.`,
+    `The biggest launches are often the worst farms per dollar: the top of the board is`,
+    `mostly THIN and SKIP, and the FARM verdicts sit further down.`,
     ``,
   ];
   return lines.join('\n');

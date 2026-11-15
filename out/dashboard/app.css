@@ -95,6 +95,9 @@ td.num, th.num { text-align: right; }
 .badge.easy { background: #e3efe7; color: var(--positive); }
 .badge.mod { background: #fdf0d5; color: #7a4a00; }
 .badge.adv { background: #f7e3df; color: var(--negative); }
+.badge.verdict-farm { background: #e3efe7; color: var(--positive); }
+.badge.verdict-thin { background: #fdf0d5; color: #7a4a00; }
+.badge.verdict-skip { background: #f7e3df; color: var(--negative); }
 .empty { padding: var(--s6); text-align: center; }
 .empty p { color: var(--muted); margin: var(--s2) 0 var(--s4); }
 .button { border: 1px solid var(--border); background: #fff; border-radius: var(--radius-control); padding: 8px 14px; }
@@ -141,6 +144,15 @@ dialog.detail::backdrop { background: rgba(14, 27, 44, 0.55); }
 .steps input { margin-right: var(--s2); accent-color: var(--accent); }
 .steps li.done b { text-decoration: line-through; color: var(--muted); }
 .note { background: var(--accent-soft); border: 1px solid #ecd9a8; border-radius: var(--radius-control); padding: var(--s3) var(--s4); font-size: 13px; margin-top: var(--s3); }
+.chart { margin: var(--s3) 0 var(--s2); }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: #e7e2d5; }
+.chart .axis { fill: var(--muted); font-size: 10px; }
+.chart .fit { stroke: var(--ink); stroke-width: 2; }
+.chart .fit.band { stroke: var(--accent); stroke-width: 1.25; stroke-dasharray: 5 4; }
+.chart circle { opacity: .8; }
+.legend { display: inline-block; margin: 0 var(--s2) var(--s1) 0; white-space: nowrap; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; }
 
 @media (max-width: 900px) {
   .lede, .model-grid { grid-template-columns: 1fr; }

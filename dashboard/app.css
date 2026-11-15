@@ -144,6 +144,15 @@ dialog.detail::backdrop { background: rgba(14, 27, 44, 0.55); }
 .steps input { margin-right: var(--s2); accent-color: var(--accent); }
 .steps li.done b { text-decoration: line-through; color: var(--muted); }
 .note { background: var(--accent-soft); border: 1px solid #ecd9a8; border-radius: var(--radius-control); padding: var(--s3) var(--s4); font-size: 13px; margin-top: var(--s3); }
+.chart { margin: var(--s3) 0 var(--s2); }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: #e7e2d5; }
+.chart .axis { fill: var(--muted); font-size: 10px; }
+.chart .fit { stroke: var(--ink); stroke-width: 2; }
+.chart .fit.band { stroke: var(--accent); stroke-width: 1.25; stroke-dasharray: 5 4; }
+.chart circle { opacity: .8; }
+.legend { display: inline-block; margin: 0 var(--s2) var(--s1) 0; white-space: nowrap; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; }
 
 @media (max-width: 900px) {
   .lede, .model-grid { grid-template-columns: 1fr; }
