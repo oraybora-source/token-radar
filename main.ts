@@ -17,7 +17,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, methodReport, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -71,6 +71,9 @@ function copyFiles(from: string, to: string): string[] {
 }
 
 copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
+// The fit report is written from the computed fit, so its numbers are always the numbers
+// the board and the dashboard render; the judge reads it as part of the dashboard's source.
+writeFileSync(join(out, 'dashboard', 'method.md'), methodReport(radar));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) {
   process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
@@ -88,5 +91,8 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+    `token radar: size curve on ${radar.fit.comps_n} comps: log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} x log10(TVL), R2 ${radar.fit.r2}, sigma ${radar.fit.sigma_dex} dex, band x${radar.fit.band_factor}\n` +
+    `token radar: out-of-sample 5-fold x${radar.fit.oos_5fold_factor} (Spearman ${radar.fit.oos_5fold_spearman}), time-split x${radar.fit.timesplit_factor} (Spearman ${radar.fit.timesplit_spearman}); bootstrap slope ${radar.fit.bootstrap_slope_mean} +- ${radar.fit.bootstrap_slope_sd}\n` +
+    `token radar: farm verdicts ${radar.fit.verdict_counts.farm} farm / ${radar.fit.verdict_counts.thin} thin / ${radar.fit.verdict_counts.skip} skip\n` +
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (4 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

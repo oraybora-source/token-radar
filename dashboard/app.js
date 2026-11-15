@@ -1,4 +1,4 @@
-// Token Radar's dashboard, radar-2. It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard, radar-3. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail view with
 // the model's own inputs and the protocol's farm plan, and a model sandbox that re-ranks the
 // board live. No network: every byte it shows is in data.js. No protocol name is
@@ -38,8 +38,8 @@
     var m = DATA.model;
     var growth = clamp(row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d, m.growth_floor, m.growth_cap);
     var growthMult = 1 + (growth / 100) * sb.growth_weight;
-    var mult = sb.useComp ? row.comp_multiple : 0.25;
-    var implied = Math.max(1, Math.round(row.tvl_usd * mult * growthMult * row.maturity_multiplier));
+    var fitted = sb.useComp ? row.fitted_value_usd : row.base_fitted_value_usd;
+    var implied = Math.max(1, Math.round(fitted * growthMult * row.maturity_multiplier));
     var expected = Math.max(1, Math.round(implied * (sb.useLikelihood ? row.launch_likelihood : 1)));
     return { implied: implied, expected: expected };
   }
@@ -90,6 +90,28 @@
     if (c === 'ethereum') return 'about $4 of gas a week';
     if (c === 'bitcoin' || c === 'tron' || c === 'bsquared' || c === 'core' || c === 'babylon genesis') return 'about $2 of gas a week';
     return 'under $0.50 of gas a week';
+  }
+  function gasUsd(chain) {
+    var c = (chain || '').toLowerCase();
+    if (c === 'ethereum') return { tx: 4, weekly: 4 };
+    if (c === 'bitcoin' || c === 'tron' || c === 'bsquared' || c === 'core' || c === 'babylon genesis') return { tx: 2, weekly: 2 };
+    return { tx: 0.5, weekly: 0.5 };
+  }
+  // The farm plan's dollar netting, the same arithmetic main.ts writes to board.json:
+  // low-end expected farmer value minus farm cost, at the band's low end.
+  function farmEcon(row) {
+    var m = DATA.model;
+    var capital = capitalFor(row);
+    var hold = holdDaysFor(row.age_days);
+    var gas = gasUsd(chainOf(row));
+    var weeks = Math.ceil(hold / 7);
+    var gasCost = Math.round((gas.tx + gas.weekly * weeks) * 100) / 100;
+    var opp = Math.round(capital * m.opp_rate_yr * (hold / 365) * 100) / 100;
+    var cost = Math.max(1, Math.round(gasCost + opp));
+    var gross = Math.max(0, Math.round(row.low_expected_value_usd * m.pool_share * capital / (m.farmed_share * row.tvl_usd)));
+    var net = gross - cost;
+    var verdict = net >= m.farm_threshold_usd ? 'farm' : net >= 0 ? 'thin' : 'skip';
+    return { capital: capital, gas: gasCost, opp: opp, cost: cost, gross: gross, net: net, verdict: verdict };
   }
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
@@ -154,13 +176,17 @@
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
+    var econ = farmEcon(p);
+    var verdictWord = econ.verdict === 'farm' ? 'FARM' : econ.verdict === 'thin' ? 'THIN' : 'SKIP';
+    var netWord = econ.net >= 0 ? '+$' + econ.net : '-$' + (-econ.net);
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $1 of gas for the first transaction', time: '5 minutes' },
-      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and ' + gasTx(chain), time: '15 minutes to set up' },
+      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: gasTx(chain) + ' for the first transaction', time: '5 minutes' },
+      { text: actionFor(p, capital, chain), cost: gasTx(chain) + ' on ' + chain, time: '15 minutes to set up' },
       { text: weeklyFor(p), cost: gasWeekly(chain), time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: pointsFor(p) + ' Never pay to claim, and never follow a claim link from a chat or a comment.', cost: 'no fee to check', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
+      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
+      { text: 'Netting at the low end of the value band: a $' + capital + ' position is expected to earn $' + econ.gross + ' gross from the launch pool, farm costs are $' + econ.cost + ', net ' + netWord + ' — verdict: ' + verdictWord + '. The pool is 10% of implied value and farmed TVL is 1% of protocol TVL; both are stated assumptions, not facts.', cost: '$' + econ.cost + ' in total farm costs', time: hold + ' days of holding' }
     ].map(stepText);
   }
 
@@ -231,6 +257,7 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'likelihood') { av = a.launch_likelihood; bv = b.launch_likelihood; }
+      else if (key === 'net') { av = a.farm.net_low_usd; bv = b.farm.net_low_usd; }
       else { av = active ? effExpected(a) : a.implied_value_usd; bv = active ? effExpected(b) : b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -253,13 +280,16 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by expected launch value' }),
-        el('p', null, 'The watchlist is the floor: every protocol with at least ', el('b', { text: '$' + Math.round(DATA.floor_usd / 1e6) + 'M' }), ' of TVL and no token on record. The early radar adds ', el('b', { text: String(DATA.early_size) }), ' pre-token protocols below that floor. Expected value is implied value times the chance the category ever issues a token. It is a model, not a promise, and never a prediction of when a token comes.')
+        el('p', null, 'The watchlist is the floor: every protocol with at least ', el('b', { text: '$' + Math.round(DATA.floor_usd / 1e6) + 'M' }), ' of TVL and no token on record. The early radar adds ', el('b', { text: String(DATA.early_size) }), ' pre-token protocols below that floor. Expected value is the fitted launch value times the chance the category ever issues a token, and every farm plan is netted to the dollar at the low end of the value band. It is a model, not a promise, and never a prediction of when a token comes.')
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Total expected value' }), el('b', { text: fmtUsd(DATA.total_expected_usd) })),
-        el('div', { class: 'fact' }, el('span', { text: 'TVL tracked on the board' }), el('b', { text: fmtUsd(DATA.total_tvl_usd) }))
+        el('div', { class: 'fact' }, el('span', { text: 'TVL tracked on the board' }), el('b', { text: fmtUsd(DATA.total_tvl_usd) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Size curve fitted' }), el('b', { text: DATA.fit.comps_n + ' comps · R² ' + DATA.fit.r2.toFixed(2) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Out-of-sample, time-split' }), el('b', { text: 'x' + DATA.fit.timesplit_factor.toFixed(2) + ' median error' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Farm verdicts' }), el('b', { text: DATA.fit.verdict_counts.farm + ' farm · ' + DATA.fit.verdict_counts.thin + ' thin · ' + DATA.fit.verdict_counts.skip + ' skip' }))
       )
     );
   }
@@ -304,6 +334,11 @@
   function diffBadge(d) {
     return el('span', { class: 'badge ' + (d === 'Easy' ? 'easy' : d === 'Moderate' ? 'mod' : 'adv'), text: d });
   }
+  function verdictBadge(v) {
+    // NOTE: the class must be verdict-skip, not "verdict skip": app.css has a .skip
+    // rule for the skip-to-content link that positions it off-screen.
+    return el('span', { class: 'badge verdict-' + v, text: v === 'farm' ? 'FARM' : v === 'thin' ? 'THIN' : 'SKIP' });
+  }
 
   function boardTable() {
     var list = sortedRows(rows());
@@ -341,6 +376,7 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((ev / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(ev) })
         )),
+        el('td', null, verdictBadge(r.farm_verdict), el('div', { class: 'num', text: (r.farm.net_low_usd >= 0 ? '+$' : '-$') + Math.abs(r.farm.net_low_usd) })),
         el('td', null, diffBadge(r.farm_difficulty))
       );
       tbody.appendChild(tr);
@@ -357,6 +393,7 @@
             sortHeader('age', 'Age'),
             sortHeader('likelihood', 'Launch chance'),
             sortHeader('expected', 'Expected value'),
+            sortHeader('net', 'Net'),
             el('th', { scope: 'col', text: 'Farm' })
           )),
           tbody
@@ -380,7 +417,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market-cap / TVL ratios are the comps the model learns its multiples from.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market caps are the comps the size curve is fitted on.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mcap / TVL' }))),
           tbody
         )
@@ -390,20 +427,36 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var f = DATA.fit;
     var comps = DATA.comps.filter(function (c) {
       return DATA.rows.some(function (r) { return (r.category || 'Other').toLowerCase() === c.category; });
-    }).sort(function (a, b) { return b.used_multiple - a.used_multiple; });
+    }).sort(function (a, b) { return b.offset_dex - a.offset_dex; });
     var compRows = comps.map(function (c) {
       return el('tr', null,
         el('td', { text: c.category }),
+        el('td', { text: c.mechanism }),
         el('td', { class: 'num', text: String(c.live_count) }),
         el('td', { class: 'num', text: c.median_multiple === null ? 'n/a' : c.median_multiple.toFixed(3) + 'x' }),
-        el('td', { class: 'num', text: c.used_multiple.toFixed(3) + 'x' })
+        el('td', { class: 'num', text: (c.offset_dex > 0 ? '+' : '') + c.offset_dex.toFixed(3) + ' dex' })
+      );
+    });
+    var mechRows = f.mechanisms.map(function (g) {
+      return el('tr', null,
+        el('td', { text: g.mechanism }),
+        el('td', { class: 'num', text: String(g.live_count) }),
+        el('td', { class: 'num', text: (g.median_offset_dex > 0 ? '+' : '') + g.median_offset_dex.toFixed(3) + ' dex' })
+      );
+    });
+    var stabRows = f.top10_stability.map(function (t) {
+      var row = DATA.rows.filter(function (r) { return r.slug === t.slug; })[0];
+      return el('tr', null,
+        el('td', { text: (row ? row.rank + '. ' : '') + t.name }),
+        el('td', { class: 'num', text: Math.round(t.stability * 100) + '%' })
       );
     });
     var gw = el('input', { type: 'range', id: 'sb-growth', min: '0', max: '1', step: '0.05', value: String(state.sb.growth_weight), 'aria-label': 'Growth weight' });
     gw.addEventListener('input', function () { state.sb.growth_weight = parseFloat(gw.value); render(); });
-    var compBox = el('input', { type: 'checkbox', id: 'sb-comp', checked: state.sb.useComp ? 'checked' : null, 'aria-label': 'Use category comps' });
+    var compBox = el('input', { type: 'checkbox', id: 'sb-comp', checked: state.sb.useComp ? 'checked' : null, 'aria-label': 'Use mechanism offsets' });
     compBox.addEventListener('change', function () { state.sb.useComp = compBox.checked; render(); });
     var likeBox = el('input', { type: 'checkbox', id: 'sb-like', checked: state.sb.useLikelihood ? 'checked' : null, 'aria-label': 'Use launch likelihood' });
     likeBox.addEventListener('change', function () { state.sb.useLikelihood = likeBox.checked; render(); });
@@ -413,13 +466,25 @@
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The page recomputes each row from the same figures and checks the number board.json carries.' }),
       el('div', { class: 'model-grid' },
         el('div', null,
-          el('h3', { text: 'The formula' }),
-          el('div', { class: 'formula' }, 'expected = tvl x comp x growth x maturity x likelihood'),
-          el('p', null, 'comp is the category multiple below, learned from the live-token protocols of the same category. growth is 1 + clamped 7-day change / 100 x ' + m.growth_weight + '. maturity is ' + m.maturity_floor + ' + min(age, ' + m.maturity_days + ' days) / ' + m.maturity_days + ' x ' + m.maturity_range + '; an unknown age uses ' + m.unknown_age_days + ' days. likelihood is the chance the category ever issues a token. TVL and seven-day growth come from the snapshot; age is the time since the protocol was first listed.'),
-          el('h3', { text: 'The category multiples' }),
-          el('p', null, 'Each multiple is the median market-cap / TVL of the category\'s live-token protocols, shrunk toward the global median (0.214x) by sample size and capped at twice it, so a thin category cannot bend the board. Medians, not means: the live mean is 5.04x, dragged by single outliers.'),
+          el('h3', { text: 'The fitted size curve' }),
+          el('div', { class: 'formula' }, 'log10(mcap) = ' + f.intercept + ' + ' + f.slope + ' x log10(TVL) + offset'),
+          el('p', null, 'Fitted by least squares on ' + f.comps_n + ' traded tokens that are comparable launches: not exchange, bridge or chain tokens, not versioned or wrapped products. The offset is the category\'s own premium or discount, shrunk toward zero by sample size and capped at +/-0.3 dex. Expected value is fitted value x growth x maturity x likelihood.'),
+          el('h3', { text: 'How well it fits' }),
+          el('p', null, 'In-sample R² ' + f.r2 + ', residual scatter ' + f.sigma_dex + ' dex, so the value band is the fitted value divided and multiplied by ' + f.band_factor + '. Out-of-sample 5-fold: median error factor x' + f.oos_5fold_factor + ', Spearman ' + f.oos_5fold_spearman + '. Time-split (fit on the ' + f.timesplit_n_train + ' comps listed before ' + f.timesplit_cut + ', tested on the ' + f.timesplit_n_test + ' listed after): median error factor x' + f.timesplit_factor + ', Spearman ' + f.timesplit_spearman + '. Bootstrap (' + f.bootstrap_runs + ' seeded resamples): slope ' + f.bootstrap_slope_mean + ' ± ' + f.bootstrap_slope_sd + ', 5th to 95th percentile ' + f.bootstrap_slope_p5 + ' to ' + f.bootstrap_slope_p95 + '.'),
+          el('h3', { text: 'Top-ten stability' }),
+          el('p', null, 'Share of bootstrap refits in which the row stays in the top ten:'),
           el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
-            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Live comps' }), el('th', { scope: 'col', text: 'Median' }), el('th', { scope: 'col', text: 'Used' }))),
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'Stays top 10' }))),
+            el('tbody', null, stabRows)
+          )),
+          el('h3', { text: 'Mechanisms' }),
+          el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Mechanism' }), el('th', { scope: 'col', text: 'Live comps' }), el('th', { scope: 'col', text: 'Median offset' }))),
+            el('tbody', null, mechRows)
+          )),
+          el('h3', { text: 'The category offsets' }),
+          el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Mechanism' }), el('th', { scope: 'col', text: 'Live comps' }), el('th', { scope: 'col', text: 'Median ratio' }), el('th', { scope: 'col', text: 'Offset' }))),
             el('tbody', null, compRows)
           ))
         ),
@@ -429,10 +494,13 @@
           el('label', { for: 'sb-growth', text: 'Growth weight' }),
           el('div', { class: 'row' }, el('span', { text: 'How much 7-day growth matters' }), el('b', { text: state.sb.growth_weight.toFixed(2) })),
           gw,
-          el('label', { class: 'check' }, compBox, 'Use category multiples (off: flat 0.25x for every row)'),
+          el('label', { class: 'check' }, compBox, 'Use mechanism offsets (off: the bare size curve for every row)'),
           el('label', { class: 'check' }, likeBox, 'Use launch likelihood (off: rank by implied value alone)'),
           el('p', { class: 'sub', text: sbActive() ? 'Sandbox is on: the table above shows sandbox ranks.' : 'Sandbox is at the stated model.' }),
-          reset
+          reset,
+          el('h3', { text: 'Farm plans, netted' }),
+          el('p', null, 'Every plan is netted at the low end of the value band. A1: the launch pool is ' + Math.round(m.pool_share * 100) + '% of implied value. A2: farmed TVL is ' + Math.round(m.farmed_share * 100) + '% of protocol TVL. A3: a position earns its share of that pool. A4: idle capital costs ' + Math.round(m.opp_rate_yr * 100) + '% a year. Verdict: FARM at net $' + m.farm_threshold_usd + ' or more, THIN from $0, SKIP below $0. This board: ' + f.verdict_counts.farm + ' farm, ' + f.verdict_counts.thin + ' thin, ' + f.verdict_counts.skip + ' skip. The full fit report, with the same numbers, is in method.md beside this page.'),
+          el('p', null, 'The biggest launches are often the worst farms per dollar: a large protocol\'s pool is split over far more farmed TVL, so a small position\'s share shrinks while its gas stays.')
         )
       ),
       el('div', { class: 'method' },
@@ -470,7 +538,7 @@
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + '  ·  ' + (row.category || 'Other') }),
         el('h2', { id: 'detail-title', text: row.name }),
-        el('p', { class: 'sub', text: categoryLine(row.category) + ' On ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') + '. Farm difficulty: ' + row.farm_difficulty + '.' })
+        el('p', { class: 'sub', text: categoryLine(row.category) + ' Mechanism: ' + row.mechanism + '. On ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') + '. Farm difficulty: ' + row.farm_difficulty + '.' })
       ),
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
     ));
@@ -480,7 +548,8 @@
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: row.comp_multiple.toFixed(3) + 'x' })),
+        el('div', null, el('span', { text: 'Fitted value (size curve)' }), el('b', { class: 'num', text: fmtUsd(row.fitted_value_usd) })),
+        el('div', null, el('span', { text: 'Value band, low to high' }), el('b', { class: 'num', text: fmtUsd(row.low_implied_value_usd) + ' – ' + fmtUsd(row.high_implied_value_usd) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: row.growth_multiplier.toFixed(4) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: row.maturity_multiplier.toFixed(4) })),
         el('div', null, el('span', { text: 'Launch likelihood' }), el('b', { class: 'num', text: Math.round(row.launch_likelihood * 100) + '%' })),
@@ -493,6 +562,22 @@
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the page recomputes this row as ' + fmtUsd(check.expected) + (match ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    var econ = farmEcon(row);
+    var econMatch = econ.net === row.farm.net_low_usd && econ.gross === row.farm.gross_low_usd && econ.cost === row.farm.total_cost_usd;
+    var verdictWord = econ.verdict === 'farm' ? 'FARM' : econ.verdict === 'thin' ? 'THIN' : 'SKIP';
+    var netWord = econ.net >= 0 ? '+$' + econ.net : '-$' + (-econ.net);
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Farm plan, netted to the dollar' }),
+      el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'Value band, low to high' }), el('b', { class: 'num', text: fmtUsd(row.low_implied_value_usd) + ' – ' + fmtUsd(row.high_implied_value_usd) })),
+        el('div', null, el('span', { text: 'Low-end expected value' }), el('b', { class: 'num', text: fmtUsd(row.low_expected_value_usd) })),
+        el('div', null, el('span', { text: 'Gross from the pool, low end' }), el('b', { class: 'num', text: '$' + econ.gross })),
+        el('div', null, el('span', { text: 'Farm cost (gas $' + econ.gas + ' + opportunity $' + econ.opp + ')' }), el('b', { class: 'num', text: '$' + econ.cost })),
+        el('div', null, el('span', { text: 'Net, low end' }), el('b', { class: 'num', text: netWord })),
+        el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: verdictWord }))
+      ),
+      el('p', { class: 'sub', text: 'Netted at the band\'s low end: the pool is 10% of implied value, farmed TVL is 1% of protocol TVL, a $' + econ.capital + ' position earns its share. The page recomputes this net as ' + netWord + (econMatch ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') })
+    ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s, i) {
@@ -504,7 +589,7 @@
         var li = el('li', { class: isDone(row.slug, i) ? 'done' : null }, box, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
         return li;
       })),
-      el('p', { class: 'note', text: 'Setup cost: $' + capital + ' of capital and ' + gasTx(chainOf(row)) + ' on ' + chainOf(row) + '. The capital stays in the position; only the gas is spent.' })
+      el('p', { class: 'note', text: 'Setup cost: $' + capital + ' of capital and ' + gasTx(chainOf(row)) + ' on ' + chainOf(row) + '. The capital stays in the position; only the gas is spent. Verdict: ' + verdictWord + ' at net ' + netWord + '.' })
     ));
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();

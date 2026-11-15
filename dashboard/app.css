@@ -95,6 +95,9 @@ td.num, th.num { text-align: right; }
 .badge.easy { background: #e3efe7; color: var(--positive); }
 .badge.mod { background: #fdf0d5; color: #7a4a00; }
 .badge.adv { background: #f7e3df; color: var(--negative); }
+.badge.verdict-farm { background: #e3efe7; color: var(--positive); }
+.badge.verdict-thin { background: #fdf0d5; color: #7a4a00; }
+.badge.verdict-skip { background: #f7e3df; color: var(--negative); }
 .empty { padding: var(--s6); text-align: center; }
 .empty p { color: var(--muted); margin: var(--s2) 0 var(--s4); }
 .button { border: 1px solid var(--border); background: #fff; border-radius: var(--radius-control); padding: 8px 14px; }
