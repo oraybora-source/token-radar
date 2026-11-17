@@ -1,13 +1,16 @@
-// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
 // board out. Every number below is a function of the snapshot's own figures. No protocol name
 // is ever special-cased: the same function scores every row, and every constant is stated in
 // the dashboard's model panel so a reader can check it.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and
-// adds pre-token protocols below the watchlist floor: the early rows the radar exists to
-// find. A protocol is pre-token when its index entry records no token (no market cap, no
-// CoinGecko id, no symbol); the snapshot's live-token protocols are kept apart and shown as
-// the market's own values, never mixed into the ranked board.
+// adds the launches the watchlist leaves out: the 20 largest pre-token protocols above the
+// floor that pass the watchlist rule's own exclusions, and the 138 largest pre-token
+// protocols below the floor. That is 198 rows in all. A protocol is pre-token when its index
+// entry records no token (no market cap, no CoinGecko id, no symbol); the snapshot's
+// live-token protocols are kept apart and shown as the market's own values, never mixed
+// into the ranked board. What the board sets aside, and why, is counted in the dashboard's
+// disposition strip, so the 758 protocols are all accounted for.
 //
 // Expected launch value follows from the snapshot's own figures, in four parts:
 //
@@ -113,10 +116,13 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+/** How many off-list launch candidates above the watchlist floor the board carries, by TVL. */
+export const OFFLIST_ROWS = 20;
+
+/** How many pre-token protocols below the watchlist floor the board carries, by TVL. */
+export const BELOW_FLOOR_ROWS = 138;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -267,8 +273,26 @@ export interface FitStats {
   bootstrap_slope_p95: number;
   top10_stability: { slug: string; name: string; stability: number }[];
   verdict_counts: { farm: number; thin: number; skip: number };
+  /** One row per model variant, each scored on the same time-split test as timesplit_factor. */
+  ablation: { variant: string; factor: number; within2: number; n: number }[];
+  /** The comps' own points for the scatter chart: [TVL, market cap] per traded token. */
+  scatter: [number, number][];
   comps: CompRow[];
   mechanisms: MechanismRow[];
+}
+
+/** How the snapshot's protocols are accounted for: the board's rows, and every protocol set
+    aside, with the reason. The groups are exclusive and in this order, so they sum to the
+    snapshot's protocol count. */
+export interface Disposition {
+  ranked: number;
+  tokened: number;
+  bridge: number;
+  lst: number;
+  exchange: number;
+  versioned_wrapped: number;
+  below_cut: number;
+  total: number;
 }
 
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
@@ -281,9 +305,11 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   early_size: number;
+  offlist_size: number;
   live_size: number;
   total_expected_usd: number;
   total_tvl_usd: number;
+  disposition: Disposition;
   watchlist: string[];
   comps: CompRow[];
   fit: FitStats;
@@ -456,6 +482,35 @@ function oosMetrics(curve: SizeCurve, test: SnapshotProtocol[]): { factor: numbe
   return { factor: Math.pow(10, med), spearman: spearman(actual, pred) };
 }
 
+/** One variant's time-split score: median error factor and share within 2x, on the test set. */
+function variantScore(actualLog: number[], predLog: number[]): { factor: number; within2: number } {
+  const errs = actualLog.map((a, i) => Math.abs(a - predLog[i]!)).sort((a, b) => a - b);
+  const med = errs.length > 0 ? errs[Math.floor(errs.length / 2)]! : 0;
+  const within = errs.filter((e) => e <= Math.log10(2)).length;
+  return { factor: Math.round(Math.pow(10, med) * 100) / 100, within2: Math.round((within / Math.max(1, errs.length)) * 100) / 100 };
+}
+
+/** The ablation table: four variants of the model, each scored on the same time-split test
+    (fit on the older-listed comps, tested on the newer ones), so a reader can see what each
+    part of the model earns. Flat multiple is the median market-cap-to-TVL ratio of the train
+    set, times TVL. Size curve is the fitted power law without its category offsets. +sector
+    adds the offsets. Full model adds growth and maturity on top. */
+function ablationTable(older: SnapshotProtocol[], newer: SnapshotProtocol[], asOf: string, sigma: number, model: ModelConstants): { variant: string; factor: number; within2: number; n: number }[] {
+  const trainCurve = fitCurve(older, model);
+  const actual = newer.map((p) => Math.log10(p.mcap_usd!));
+  const medianRatio = median(older.map((p) => p.mcap_usd! / p.tvl_usd));
+  const flat = newer.map((p) => Math.log10(medianRatio * p.tvl_usd));
+  const size = newer.map((p) => trainCurve.predictBase(p));
+  const sector = newer.map((p) => trainCurve.predict(p));
+  const full = newer.map((p) => Math.log10(expectedValue(p, asOf, trainCurve, sigma, model).implied));
+  return [
+    { variant: 'Flat multiple (median mcap / TVL)', ...variantScore(actual, flat), n: newer.length },
+    { variant: 'Size curve, no sector offset', ...variantScore(actual, size), n: newer.length },
+    { variant: '+ sector offsets', ...variantScore(actual, sector), n: newer.length },
+    { variant: 'Full model (+ growth, + maturity)', ...variantScore(actual, full), n: newer.length },
+  ];
+}
+
 /**
  * The fitted size curve and its tests, from the snapshot's own traded tokens. Deterministic:
  * folds are by slug order, the time split is by listed date, the bootstrap is seeded.
@@ -494,6 +549,12 @@ export function fitSizeCurve(snapshot: Snapshot, model: ModelConstants = MODEL):
   const older = dated.filter((x) => cut !== null && x.d < cut).map((x) => x.p);
   const newer = dated.filter((x) => cut !== null && x.d >= cut).map((x) => x.p);
   const ts = newer.length > 0 && older.length > 0 ? oosMetrics(fitCurve(older, model), newer) : { factor: 0, spearman: 0 };
+
+  // Ablation and scatter: the same time-split test scored by four variants, and the comps'
+  // own points for the dashboard's chart. Both are computed here, from the same split, so
+  // the numbers the page shows are the numbers the fit earned.
+  const ablation = ablationTable(older, newer, snapshot.as_of, sigma, model);
+  const scatter: [number, number][] = comps.map((p) => [p.tvl_usd, p.mcap_usd!] as [number, number]);
 
   // Bootstrap: resample the comps with replacement, refit, watch the slope move.
   const rng = mulberry32(model.bootstrap_seed);
@@ -565,6 +626,8 @@ export function fitSizeCurve(snapshot: Snapshot, model: ModelConstants = MODEL):
     bootstrap_slope_p95: Math.round(slopeP95 * 10000) / 10000,
     top10_stability: [],
     verdict_counts: { farm: 0, thin: 0, skip: 0 },
+    ablation,
+    scatter,
     comps: table,
     mechanisms,
   };
@@ -622,6 +685,51 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
 }
 
+/** The watchlist rule's own excluded categories, as RULES.txt states them. */
+const WATCHLIST_EXCLUDED_CATEGORIES = new Set(['bridge', 'canonical bridge', 'liquid staking', 'liquid restaking', 'restaked btc', 'cex']);
+
+/** Exchange names the watchlist rule keeps off the list. */
+const EXCHANGE_NAMES = ['binance', 'coinbase', 'bybit', 'kraken', 'bitget', 'okx', 'bitfinex', 'gemini'];
+
+/** Bridge and liquid-staking categories, for the disposition strip. */
+const BRIDGE_CATEGORIES = new Set(['bridge', 'canonical bridge', 'cross chain bridge']);
+const LST_CATEGORIES = new Set(['liquid staking', 'liquid restaking', 'restaked btc']);
+
+/** Whether a protocol passes the watchlist rule's exclusions: not a bridge, staking or
+    exchange product, not a versioned pool, not a wrapped or staked product, and not an
+    exchange's own name. */
+export function passesWatchlistRule(p: SnapshotProtocol): boolean {
+  if (WATCHLIST_EXCLUDED_CATEGORIES.has((p.category ?? '').toLowerCase())) return false;
+  if (VERSIONED.test(p.name)) return false;
+  if (/\b(wrapped|staked|staking)\b/i.test(p.name)) return false;
+  const name = p.name.toLowerCase();
+  if (EXCHANGE_NAMES.some((e) => name.startsWith(e))) return false;
+  return true;
+}
+
+/** Whether a protocol is an off-list launch candidate: pre-token, above the watchlist floor,
+    not on the watchlist, and passing the watchlist rule's exclusions. */
+export function isOffList(p: SnapshotProtocol, watchlist: Set<string>, floorUsd: number): boolean {
+  return isPreToken(p) && !watchlist.has(p.slug) && p.tvl_usd >= floorUsd && passesWatchlistRule(p);
+}
+
+/** The snapshot's accounting: which protocols the board ranks, and why each other one is set
+    aside. Groups are checked in this order, so each protocol lands in exactly one. */
+export function dispositionCounts(snapshot: Snapshot, boardSlugs: Set<string>): Disposition {
+  const d: Disposition = { ranked: 0, tokened: 0, bridge: 0, lst: 0, exchange: 0, versioned_wrapped: 0, below_cut: 0, total: snapshot.protocols.length };
+  for (const p of snapshot.protocols) {
+    if (boardSlugs.has(p.slug)) { d.ranked++; continue; }
+    if (!isPreToken(p)) { d.tokened++; continue; }
+    const cat = (p.category ?? '').toLowerCase();
+    if (BRIDGE_CATEGORIES.has(cat)) { d.bridge++; continue; }
+    if (LST_CATEGORIES.has(cat)) { d.lst++; continue; }
+    if (cat === 'cex' || EXCHANGE_NAMES.some((e) => p.name.toLowerCase().startsWith(e))) { d.exchange++; continue; }
+    if (VERSIONED.test(p.name) || /\b(wrapped|staked|staking)\b/i.test(p.name)) { d.versioned_wrapped++; continue; }
+    d.below_cut++;
+  }
+  return d;
+}
+
 /** The snapshot's protocol by slug. */
 function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
@@ -634,33 +742,50 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   return scoreBoard(snapshot, curve, fit.sigma_dex, model, fit);
 }
 
-/** Score the chosen protocols with one fitted curve and rank them by expected value. */
+/** Largest first by TVL, ties by slug: the board's selection order. */
+function byTvlDesc(a: SnapshotProtocol, b: SnapshotProtocol): number {
+  return b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
+}
+
+/** Score the chosen protocols with one fitted curve and rank them by expected value.
+    The board is 198 rows: the 40 watchlist protocols, the 20 off-list launch candidates
+    above the floor, and the 138 largest pre-token protocols below the floor. Only the
+    selection changed from radar-3: the value formula, the likelihood and the netting are
+    the same, so every row's numbers are computed the same way. */
 export function scoreBoard(snapshot: Snapshot, curve: SizeCurve, sigma: number, model: ModelConstants, fit: FitStats): BoardRow[] {
   const index = bySlug(snapshot.protocols);
+  const watch = new Set(snapshot.watchlist);
   const chosen = new Map<string, SnapshotProtocol>();
-  // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
-  // board's coverage is the gate's row and is never gambled on a missing record).
+  // The watchlist is the floor: every slug, even one the snapshot no longer carries (it
+  // cannot, but the board's coverage is the gate's row and is never gambled on a missing
+  // record).
   for (const slug of snapshot.watchlist) {
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
-  // for a watchlist row: a chosen protocol stays chosen.
-  const early = snapshot.protocols
+  // Off-list: the largest pre-token protocols above the floor that the watchlist leaves
+  // out and that pass its own exclusions. These are the launches the radar exists to find
+  // early, and the board's biggest gap in radar-3 was leaving them out entirely.
+  const offList = snapshot.protocols.filter((p) => isOffList(p, watch, snapshot.floor_usd)).sort(byTvlDesc).slice(0, OFFLIST_ROWS);
+  for (const p of offList) chosen.set(p.slug, p);
+  // Below the floor: the largest rankable pre-token protocols, as radar-3 had them, capped
+  // so the board holds 198 rows in all. Never a replacement for a watchlist row: a chosen
+  // protocol stays chosen.
+  const below = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    .slice(0, EARLY_ROWS);
-  for (const p of early) chosen.set(p.slug, p);
+    .sort(byTvlDesc)
+    .slice(0, BELOW_FLOOR_ROWS);
+  for (const p of below) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
     const v = expectedValue(p, snapshot.as_of, curve, sigma, model);
-    const econ = farmEconomics(p, v.age, v.lowExpected, model);
-    return { p, ...v, econ };
+    return { p, v, econ: farmEconomics(p, v.age, v.lowExpected, model) };
   });
-  scored.sort((a, b) => b.expected - a.expected || b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
+  scored.sort((a, b) => b.v.expected - a.v.expected || b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const counts = { farm: 0, thin: 0, skip: 0 };
   const rows = scored.map((s, i) => {
     counts[s.econ.verdict]++;
+    const multiple = Math.round((s.v.fitted / s.p.tvl_usd) * 1000) / 1000;
     return {
       rank: i + 1,
       slug: s.p.slug,
@@ -675,28 +800,28 @@ export function scoreBoard(snapshot: Snapshot, curve: SizeCurve, sigma: number, 
       gecko_id: s.p.gecko_id,
       symbol: s.p.symbol,
       token_status: 'pre-token',
-      age_days: s.age,
-      implied_value_usd: s.expected,
-      raw_implied_value_usd: s.implied,
-      low_implied_value_usd: s.lowImplied,
-      high_implied_value_usd: s.highImplied,
-      low_expected_value_usd: s.lowExpected,
-      launch_likelihood: s.likelihood,
-      fitted_value_usd: s.fitted,
-      base_fitted_value_usd: s.baseFitted,
-      comp_multiple: Math.round((s.fitted / s.p.tvl_usd) * 1000) / 1000,
+      age_days: s.v.age,
+      implied_value_usd: s.v.expected,
+      raw_implied_value_usd: s.v.implied,
+      low_implied_value_usd: s.v.lowImplied,
+      high_implied_value_usd: s.v.highImplied,
+      low_expected_value_usd: s.v.lowExpected,
+      launch_likelihood: s.v.likelihood,
+      fitted_value_usd: s.v.fitted,
+      base_fitted_value_usd: s.v.baseFitted,
+      comp_multiple: multiple,
       farm_difficulty: farmDifficulty(s.p),
       farm_verdict: s.econ.verdict,
       farm: s.econ,
       model: {
-        comp_multiple: Math.round((s.fitted / s.p.tvl_usd) * 1000) / 1000,
-        growth_pct: s.growthPct,
-        growth_multiplier: s.growthMult,
-        maturity_multiplier: s.maturityMult,
-        launch_likelihood: s.likelihood,
-        age_days: s.age,
+        comp_multiple: multiple,
+        growth_pct: s.v.growthPct,
+        growth_multiplier: s.v.growthMult,
+        maturity_multiplier: s.v.maturityMult,
+        launch_likelihood: s.v.likelihood,
+        age_days: s.v.age,
       },
-      farm_steps: farmSteps(s.p, s.age, s.econ).map(stepText),
+      farm_steps: farmSteps(s.p, s.v.age, s.econ).map(stepText),
     } as BoardRow;
   });
   fit.verdict_counts = counts;
@@ -940,6 +1065,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const board = scoreBoard(snapshot, curve, fit.sigma_dex, model, fit);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const offlist = board.filter((r) => !snapshot.watchlist.includes(r.slug) && r.tvl_usd >= snapshot.floor_usd).length;
+  const disposition = dispositionCounts(snapshot, new Set(board.map((r) => r.slug)));
 
   // Bootstrap rank stability: refit the curve on 200 seeded resamples of the comps and
   // count how often each of the board's top ten stays in the top ten.
@@ -974,9 +1101,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
+    offlist_size: offlist,
     live_size: live.length,
     total_expected_usd: board.reduce((n, r) => n + r.implied_value_usd, 0),
     total_tvl_usd: board.reduce((n, r) => n + r.tvl_usd, 0),
+    disposition,
     watchlist: snapshot.watchlist,
     comps: fit.comps,
     fit,
@@ -1053,7 +1182,7 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
 export function methodReport(radar: RadarData): string {
   const f = radar.fit;
   const lines: string[] = [
-    `# Token Radar: how the radar-3 model works`,
+    `# Token Radar: how the ${radar.model_version} model works`,
     ``,
     `This file is written by main.ts from the fit it computed on the sealed snapshot, so`,
     `every number here is the number the board and the dashboard render. Nothing is`,
@@ -1085,6 +1214,17 @@ export function methodReport(radar: RadarData): string {
     `  standard deviation ${f.bootstrap_slope_sd}, 5th to 95th percentile ${f.bootstrap_slope_p5} to ${f.bootstrap_slope_p95}.`,
     `- Top-ten rank stability (share of bootstrap refits in which the row stays top ten):`,
     ...f.top10_stability.map((t) => `  rank ${radar.rows.find((r) => r.slug === t.slug)?.rank ?? '?'} ${t.name}: ${Math.round(t.stability * 100)}%`),
+    ``,
+    `## Ablation: what each part earns`,
+    ``,
+    `Same time-split test as above, four variants:`,
+    ...f.ablation.map((a) => `- ${a.variant}: x${a.factor}, ${Math.round(a.within2 * 100)}% within 2x (${a.n} tested).`),
+    ``,
+    `## Coverage`,
+    ``,
+    `Board: ${radar.board_size} rows (${radar.watchlist_size} watchlist, ${radar.offlist_size} off-list above the floor, ${radar.board_size - radar.watchlist_size - radar.offlist_size} below it).`,
+    `Set aside, of ${radar.disposition.total}: ${radar.disposition.tokened} already record a token, ${radar.disposition.bridge} bridges, ${radar.disposition.lst} liquid staking/restaking,`,
+    `${radar.disposition.exchange} exchanges, ${radar.disposition.versioned_wrapped} versioned or wrapped, ${radar.disposition.below_cut} pre-token below the cut.`,
     ``,
     `## Mechanisms`,
     ``,

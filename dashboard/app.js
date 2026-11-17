@@ -1,7 +1,9 @@
-// Token Radar's dashboard, radar-3. It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard, radar-4. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail view with
 // the model's own inputs and the protocol's farm plan, and a model sandbox that re-ranks the
-// board live. No network: every byte it shows is in data.js. No protocol name is
+// board live. The board carries the farm economics and the value band on every row, a scatter
+// chart and an ablation table for the fit, a best-farms card, and a strip accounting for all
+// 758 protocols. No network: every byte it shows is in data.js. No protocol name is
 // special-cased anywhere here: every number is recomputed from the snapshot figures.
 (function () {
   'use strict';
@@ -112,6 +114,30 @@
     var net = gross - cost;
     var verdict = net >= m.farm_threshold_usd ? 'farm' : net >= 0 ? 'thin' : 'skip';
     return { capital: capital, gas: gasCost, opp: opp, cost: cost, gross: gross, net: net, verdict: verdict };
+  }
+  // Active hours behind a farm plan: the steps' own times added up (5 minutes for the
+  // wallet, 15 to set up, 10 a week through the hold, 10 to check points, 5 for the log).
+  // Net per hour is the low-end net divided by those hours: the return on the farmer's
+  // time, not on the capital sitting in the position.
+  function activeHours(hold) { return (35 + 10 * Math.ceil(hold / 7)) / 60; }
+  function netPerHour(row) {
+    var econ = farmEcon(row);
+    var hold = holdDaysFor(row.age_days);
+    var hours = activeHours(hold);
+    return { econ: econ, hold: hold, hours: hours, perHour: econ.net / hours };
+  }
+  function fmtPerHour(v) {
+    var a = Math.abs(v);
+    return (v >= 0 ? '+' : '-') + '$' + (a >= 100 ? Math.round(a) : a >= 10 ? a.toFixed(1) : a.toFixed(2)) + '/h';
+  }
+  // The P25-P75 band: the central half of the model's lognormal value band, +-0.6745 sigma.
+  function band25_75(ev) {
+    var f = Math.pow(10, 0.6745 * DATA.fit.sigma_dex);
+    return { lo: ev / f, hi: ev * f };
+  }
+  function shortAction(row) {
+    var a = actionFor(row, capitalFor(row), chainOf(row));
+    return a.length > 72 ? a.slice(0, 69) + '...' : a;
   }
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
@@ -277,19 +303,41 @@
   }
 
   function lede() {
+    var d = DATA.disposition;
+    var parts = [
+      ['Ranked', d.ranked, '#b96a00'],
+      ['Already record a token', d.tokened, '#5c6b78'],
+      ['Bridges', d.bridge, '#7a6a9b'],
+      ['Liquid staking / restaking', d.lst, '#4a7a96'],
+      ['Exchange', d.exchange, '#96704a'],
+      ['Versioned or wrapped', d.versioned_wrapped, '#8a8a5c'],
+      ['Below the cut', d.below_cut, '#b9b09a'],
+    ];
+    var bar = el('div', { class: 'dispo-bar', 'aria-hidden': 'true' });
+    parts.forEach(function (p) {
+      bar.appendChild(el('i', { style: 'width:' + (p[1] / d.total * 100).toFixed(1) + '%;background:' + p[2], title: p[0] + ': ' + p[1] }));
+    });
     return el('section', { class: 'lede' },
       el('div', null,
-        el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by expected launch value' }),
-        el('p', null, 'The watchlist is the floor: every protocol with at least ', el('b', { text: '$' + Math.round(DATA.floor_usd / 1e6) + 'M' }), ' of TVL and no token on record. The early radar adds ', el('b', { text: String(DATA.early_size) }), ' pre-token protocols below that floor. Expected value is the fitted launch value times the chance the category ever issues a token, and every farm plan is netted to the dollar at the low end of the value band. It is a model, not a promise, and never a prediction of when a token comes.')
+        el('h1', { text: DATA.board_size + ' pre-token protocols, ranked by expected launch value' }),
+        el('p', null, 'The watchlist is the floor: every protocol with at least ', el('b', { text: '$' + Math.round(DATA.floor_usd / 1e6) + 'M' }), ' of TVL and no token on record. The board adds ', el('b', { text: String(DATA.offlist_size) }), ' off-list launches above that floor and ', el('b', { text: String(DATA.board_size - DATA.watchlist_size - DATA.offlist_size) }), ' pre-token protocols below it. Expected value is the fitted launch value times the chance the category ever issues a token. Every farm plan is netted to the dollar at the low end of the value band. It is a model, not a promise, and never a prediction of when a token comes.')
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
-        el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Off-list above the floor' }), el('b', { text: String(DATA.offlist_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Total expected value' }), el('b', { text: fmtUsd(DATA.total_expected_usd) })),
         el('div', { class: 'fact' }, el('span', { text: 'TVL tracked on the board' }), el('b', { text: fmtUsd(DATA.total_tvl_usd) })),
         el('div', { class: 'fact' }, el('span', { text: 'Size curve fitted' }), el('b', { text: DATA.fit.comps_n + ' comps · R² ' + DATA.fit.r2.toFixed(2) })),
         el('div', { class: 'fact' }, el('span', { text: 'Out-of-sample, time-split' }), el('b', { text: 'x' + DATA.fit.timesplit_factor.toFixed(2) + ' median error' })),
         el('div', { class: 'fact' }, el('span', { text: 'Farm verdicts' }), el('b', { text: DATA.fit.verdict_counts.farm + ' farm · ' + DATA.fit.verdict_counts.thin + ' thin · ' + DATA.fit.verdict_counts.skip + ' skip' }))
+      ),
+      el('div', { class: 'dispo' },
+        el('div', { class: 'dispo-line' },
+          el('b', { text: 'Where the ' + d.total + ' protocols go: ' }),
+          el('span', { text: parts.map(function (p) { return p[1] + ' ' + p[0].toLowerCase(); }).join(' · ') })
+        ),
+        bar,
+        el('p', { class: 'sub', text: 'Bridges, staking products, exchanges and versioned or wrapped products are set aside by the watchlist rule; the ' + d.below_cut + ' below the cut are pre-token and rankable, but below the board’s early cut. Every protocol is counted once.' })
       )
     );
   }
@@ -354,9 +402,11 @@
     var tbody = el('tbody');
     list.forEach(function (r) {
       var ev = active ? effExpected(r) : r.implied_value_usd;
+      var band = band25_75(ev);
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
       var rankLabel = active ? String(list.indexOf(r) + 1) : String(r.rank);
+      var np = netPerHour(r);
       var tr = el('tr', {
         'data-selected': state.selected === r.slug ? 'true' : 'false',
         tabindex: '0',
@@ -372,12 +422,18 @@
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', { class: 'num', text: Math.round(r.launch_likelihood * 100) + '%' }),
-        el('td', null, el('div', { class: 'implied' },
-          el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((ev / max) * 100)) + '%' })),
-          el('span', { class: 'num', text: fmtUsd(ev) })
-        )),
+        el('td', null,
+          el('div', { class: 'implied' },
+            el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((ev / max) * 100)) + '%' })),
+            el('span', { class: 'num', text: fmtUsd(ev) })
+          ),
+          el('div', { class: 'band sub', text: 'P25–P75 ' + fmtUsd(band.lo) + ' – ' + fmtUsd(band.hi) })
+        ),
         el('td', null, verdictBadge(r.farm_verdict), el('div', { class: 'num', text: (r.farm.net_low_usd >= 0 ? '+$' : '-$') + Math.abs(r.farm.net_low_usd) })),
-        el('td', null, diffBadge(r.farm_difficulty))
+        el('td', null,
+          el('div', { class: 'farm-action', text: shortAction(r) }),
+          el('div', { class: 'farm-econ num', text: r.farm_difficulty + ' · $' + np.econ.cost + ' · ' + np.hold + 'd · ' + fmtPerHour(np.perHour) })
+        )
       );
       tbody.appendChild(tr);
     });
@@ -425,6 +481,66 @@
     );
   }
 
+  function bestFarmsCard() {
+    var scored = DATA.rows.map(function (r) { return { row: r, np: netPerHour(r) }; })
+      .filter(function (x) { return x.np.perHour > 0; })
+      .sort(function (a, b) { return b.np.perHour - a.np.perHour || b.np.econ.net - a.np.econ.net; })
+      .slice(0, 5);
+    if (scored.length === 0) return null;
+    var tbody = el('tbody');
+    scored.forEach(function (x, i) {
+      var r = x.row;
+      tbody.appendChild(el('tr', { onclick: function () { openDetail(r.slug); } },
+        el('td', { class: 'num', text: String(i + 1) }),
+        el('td', null, el('b', { text: r.name }), el('span', { class: 'sub', text: ' rank ' + r.rank + ' · ' + (r.category || 'Other') })),
+        el('td', null, el('span', { class: 'sub', text: shortAction(r) })),
+        el('td', { class: 'num', text: '$' + x.np.econ.cost }),
+        el('td', { class: 'num', text: x.np.hold + 'd' }),
+        el('td', { class: 'num', text: (x.np.econ.net >= 0 ? '+$' : '-$') + Math.abs(x.np.econ.net) }),
+        el('td', { class: 'num', text: fmtPerHour(x.np.perHour) }),
+        el('td', null, verdictBadge(r.farm_verdict))
+      ));
+    });
+    return el('section', { class: 'panel bestfarms' },
+      el('h2', { text: 'Best farms now, by net per hour' }),
+      el('p', { class: 'sub', text: 'Low-end net divided by the farm’s active hours (5 minutes for the wallet, 15 to set up, 10 a week, 10 to check points, 5 for the log). Only positive net per hour is shown.' }),
+      el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
+        el('thead', null, el('tr', null,
+          el('th', { scope: 'col', text: '#' }),
+          el('th', { scope: 'col', text: 'Protocol' }),
+          el('th', { scope: 'col', text: 'Farm' }),
+          el('th', { scope: 'col', text: 'Cost' }),
+          el('th', { scope: 'col', text: 'Hold' }),
+          el('th', { scope: 'col', text: 'Net' }),
+          el('th', { scope: 'col', text: 'Net / hour' }),
+          el('th', { scope: 'col', text: 'Verdict' })
+        )),
+        tbody
+      ))
+    );
+  }
+
+  // The comps' scatter from the fit's own points (log-log, fitted line, +-1 sigma band):
+  // an inline SVG from DATA.fit.scatter, so chart and code cannot disagree.
+  function scatterSvg() {
+    var pts = DATA.fit.scatter, f = DATA.fit, W = 660, H = 360, L = 52, B = 40, R = 14, T = 12;
+    var xs = pts.map(function (p) { return Math.log10(p[0]); }), ys = pts.map(function (p) { return Math.log10(p[1]); });
+    var x0 = Math.floor(Math.min.apply(null, xs)), x1 = Math.ceil(Math.max.apply(null, xs));
+    var y0 = Math.floor(Math.min.apply(null, ys)), y1 = Math.ceil(Math.max.apply(null, ys));
+    function X(v) { return L + (v - x0) / (x1 - x0) * (W - L - R); }
+    function Y(v) { return H - B - (v - y0) / (y1 - y0) * (H - T - B); }
+    function n(v) { return Math.round(v * 10) / 10; }
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Comps: market cap vs TVL, log scales">';
+    s += '<polygon points="' + n(X(x0)) + ',' + n(Y(f.intercept + f.slope * x0 - f.sigma_dex)) + ' ' + n(X(x1)) + ',' + n(Y(f.intercept + f.slope * x1 - f.sigma_dex)) + ' ' + n(X(x1)) + ',' + n(Y(f.intercept + f.slope * x1 + f.sigma_dex)) + ' ' + n(X(x0)) + ',' + n(Y(f.intercept + f.slope * x0 + f.sigma_dex)) + '" fill="#f3e3c2"/>';
+    var g;
+    for (g = x0; g <= x1; g++) s += '<text x="' + n(X(g)) + '" y="' + (H - 24) + '" font-size="11" text-anchor="middle" fill="#5c6b78">10^' + g + '</text>';
+    for (g = y0; g <= y1; g++) s += '<text x="' + (L - 6) + '" y="' + (n(Y(g)) + 4) + '" font-size="11" text-anchor="end" fill="#5c6b78">10^' + g + '</text>';
+    s += '<line x1="' + n(X(x0)) + '" y1="' + n(Y(f.intercept + f.slope * x0)) + '" x2="' + n(X(x1)) + '" y2="' + n(Y(f.intercept + f.slope * x1)) + '" stroke="#b96a00" stroke-width="2"/>';
+    pts.forEach(function (p) { s += '<circle cx="' + n(X(Math.log10(p[0]))) + '" cy="' + n(Y(Math.log10(p[1]))) + '" r="2.6" fill="#16304a"/>'; });
+    s += '<text x="' + (W / 2) + '" y="' + (H - 6) + '" font-size="12" text-anchor="middle">TVL (log scale)</text></svg>';
+    return s;
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var f = DATA.fit;
@@ -454,6 +570,14 @@
         el('td', { class: 'num', text: Math.round(t.stability * 100) + '%' })
       );
     });
+    var ablRows = f.ablation.map(function (a) {
+      return el('tr', null,
+        el('td', { text: a.variant }),
+        el('td', { class: 'num', text: 'x' + a.factor.toFixed(2) }),
+        el('td', { class: 'num', text: Math.round(a.within2 * 100) + '%' }),
+        el('td', { class: 'num', text: String(a.n) })
+      );
+    });
     var gw = el('input', { type: 'range', id: 'sb-growth', min: '0', max: '1', step: '0.05', value: String(state.sb.growth_weight), 'aria-label': 'Growth weight' });
     gw.addEventListener('input', function () { state.sb.growth_weight = parseFloat(gw.value); render(); });
     var compBox = el('input', { type: 'checkbox', id: 'sb-comp', checked: state.sb.useComp ? 'checked' : null, 'aria-label': 'Use mechanism offsets' });
@@ -463,14 +587,23 @@
     var reset = el('button', { class: 'button', type: 'button', text: 'Reset sandbox', onclick: function () { state.sb = { growth_weight: DEF.growth_weight, useComp: true, useLikelihood: true }; render(); } });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How expected value is computed' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The page recomputes each row from the same figures and checks the number board.json carries.' }),
+      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No name is special-cased. The page recomputes each row and checks the number board.json carries.' }),
       el('div', { class: 'model-grid' },
         el('div', null,
           el('h3', { text: 'The fitted size curve' }),
           el('div', { class: 'formula' }, 'log10(mcap) = ' + f.intercept + ' + ' + f.slope + ' x log10(TVL) + offset'),
           el('p', null, 'Fitted by least squares on ' + f.comps_n + ' traded tokens that are comparable launches: not exchange, bridge or chain tokens, not versioned or wrapped products. The offset is the category\'s own premium or discount, shrunk toward zero by sample size and capped at +/-0.3 dex. Expected value is fitted value x growth x maturity x likelihood.'),
           el('h3', { text: 'How well it fits' }),
-          el('p', null, 'In-sample R² ' + f.r2 + ', residual scatter ' + f.sigma_dex + ' dex, so the value band is the fitted value divided and multiplied by ' + f.band_factor + '. Out-of-sample 5-fold: median error factor x' + f.oos_5fold_factor + ', Spearman ' + f.oos_5fold_spearman + '. Time-split (fit on the ' + f.timesplit_n_train + ' comps listed before ' + f.timesplit_cut + ', tested on the ' + f.timesplit_n_test + ' listed after): median error factor x' + f.timesplit_factor + ', Spearman ' + f.timesplit_spearman + '. Bootstrap (' + f.bootstrap_runs + ' seeded resamples): slope ' + f.bootstrap_slope_mean + ' ± ' + f.bootstrap_slope_sd + ', 5th to 95th percentile ' + f.bootstrap_slope_p5 + ' to ' + f.bootstrap_slope_p95 + '.'),
+          el('p', null, 'In-sample R² ' + f.r2 + ', scatter ' + f.sigma_dex + ' dex (value band x' + f.band_factor + ' either way). Out-of-sample 5-fold: median error x' + f.oos_5fold_factor + ', Spearman ' + f.oos_5fold_spearman + '. Time-split: median error x' + f.timesplit_factor + ', Spearman ' + f.timesplit_spearman + '.'),
+          el('h3', { text: 'The fit, seen' }),
+          el('p', null, 'Each dot is one of the ' + f.comps_n + ' traded tokens the curve is fitted on. The line is the fitted power law; the band is plus and minus one sigma (' + f.sigma_dex + ' dex).'),
+          el('div', { class: 'scatter' }, el('div', { html: scatterSvg() })),
+          el('h3', { text: 'What each part of the model earns' }),
+          el('p', null, 'The same time-split test (fit on the ' + f.timesplit_n_train + ' comps listed before ' + f.timesplit_cut + ', tested on the ' + f.timesplit_n_test + ' after), scored by four variants:'),
+          el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Variant' }), el('th', { scope: 'col', text: 'Median error' }), el('th', { scope: 'col', text: 'Within 2x' }), el('th', { scope: 'col', text: 'Tested' }))),
+            el('tbody', null, ablRows)
+          )),
           el('h3', { text: 'Top-ten stability' }),
           el('p', null, 'Share of bootstrap refits in which the row stays in the top ten:'),
           el('div', { class: 'table-wrap' }, el('table', { class: 'compact' },
@@ -490,7 +623,7 @@
         ),
         el('div', { class: 'sandbox' },
           el('h3', { text: 'Model sandbox' }),
-          el('p', null, 'Change the inputs and the board re-ranks live, in this page only. The board file never moves: its ranks are the model as stated above.'),
+          el('p', null, 'Change the inputs and the board re-ranks live, in this page only.'),
           el('label', { for: 'sb-growth', text: 'Growth weight' }),
           el('div', { class: 'row' }, el('span', { text: 'How much 7-day growth matters' }), el('b', { text: state.sb.growth_weight.toFixed(2) })),
           gw,
@@ -499,13 +632,13 @@
           el('p', { class: 'sub', text: sbActive() ? 'Sandbox is on: the table above shows sandbox ranks.' : 'Sandbox is at the stated model.' }),
           reset,
           el('h3', { text: 'Farm plans, netted' }),
-          el('p', null, 'Every plan is netted at the low end of the value band. A1: the launch pool is ' + Math.round(m.pool_share * 100) + '% of implied value. A2: farmed TVL is ' + Math.round(m.farmed_share * 100) + '% of protocol TVL. A3: a position earns its share of that pool. A4: idle capital costs ' + Math.round(m.opp_rate_yr * 100) + '% a year. Verdict: FARM at net $' + m.farm_threshold_usd + ' or more, THIN from $0, SKIP below $0. This board: ' + f.verdict_counts.farm + ' farm, ' + f.verdict_counts.thin + ' thin, ' + f.verdict_counts.skip + ' skip. The full fit report, with the same numbers, is in method.md beside this page.'),
+          el('p', null, 'Netted at the low end of the value band. A1: the pool is ' + Math.round(m.pool_share * 100) + '% of implied value. A2: farmed TVL is ' + Math.round(m.farmed_share * 100) + '% of protocol TVL. A3: a position earns its share. A4: idle capital costs ' + Math.round(m.opp_rate_yr * 100) + '% a year. Verdict: FARM at net $' + m.farm_threshold_usd + ' or more, THIN from $0, SKIP below $0. This board: ' + f.verdict_counts.farm + ' farm, ' + f.verdict_counts.thin + ' thin, ' + f.verdict_counts.skip + ' skip.'),
           el('p', null, 'The biggest launches are often the worst farms per dollar: a large protocol\'s pool is split over far more farmed TVL, so a small position\'s share shrinks while its gas stays.')
         )
       ),
       el('div', { class: 'method' },
-        el('p', null, el('b', { text: 'How to read this board. ' }), '“No token on record” means the snapshot records no token for the protocol; it is not proof it has none. The watchlist is a floor, never a ceiling: the early radar ranks pre-token protocols below it too. A high expected value is a claim about worth if a launch happened, not a prediction that one will.'),
-        el('p', null, el('b', { text: 'Farming safely. ' }), 'Use a fresh wallet, keep its seed phrase offline, never pay to claim anything, and claim only from links the protocol itself publishes. If a protocol never launches, the position is still a yield position, not a loss by itself.')
+        el('p', null, el('b', { text: 'How to read this board. ' }), '“No token on record” means the snapshot records no token; it is not proof it has none. The watchlist is a floor, never a ceiling. A high expected value is a claim about worth if a launch happened, not a prediction that one will.'),
+        el('p', null, el('b', { text: 'Farming safely. ' }), 'Use a fresh wallet, keep its seed phrase offline, never pay to claim, and claim only from links the protocol itself publishes.')
       )
     );
   }
@@ -605,7 +738,11 @@
     shell.appendChild(lede());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') {
+      var best = bestFarmsCard();
+      if (best) shell.appendChild(best);
+      shell.appendChild(modelPanel());
+    }
     shell.appendChild(el('p', { class: 'foot', text: 'Token Radar, model ' + DATA.model_version + '. Snapshot ' + DATA.as_of + ' from the DefiLlama protocol index. Implied and expected values are this radar\u2019s own claims, never prices, and never a prediction of when a token comes.' }));
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');

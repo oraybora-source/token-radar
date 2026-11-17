@@ -95,6 +95,9 @@ td.num, th.num { text-align: right; }
 .badge.easy { background: #e3efe7; color: var(--positive); }
 .badge.mod { background: #fdf0d5; color: #7a4a00; }
 .badge.adv { background: #f7e3df; color: var(--negative); }
+.badge.verdict-farm { background: #e3efe7; color: var(--positive); }
+.badge.verdict-thin { background: #fdf0d5; color: #7a4a00; }
+.badge.verdict-skip { background: #f7e3df; color: var(--negative); }
 .empty { padding: var(--s6); text-align: center; }
 .empty p { color: var(--muted); margin: var(--s2) 0 var(--s4); }
 .button { border: 1px solid var(--border); background: #fff; border-radius: var(--radius-control); padding: 8px 14px; }
@@ -148,3 +151,13 @@ dialog.detail::backdrop { background: rgba(14, 27, 44, 0.55); }
   .shell { padding: 0 var(--s4) var(--s6); }
   .top { margin: 0 calc(-1 * var(--s4)); padding-left: var(--s4); padding-right: var(--s4); }
 }
+
+/* radar-4: disposition strip, farm economics, value band, scatter chart. */
+.dispo { grid-column: 1 / -1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: var(--s3) var(--s4); }
+.dispo-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin: var(--s2) 0; background: var(--border-soft); }
+.dispo-bar i { display: block; height: 100%; }
+.band { text-align: right; margin-top: 2px; }
+.farm-action { font-size: 13px; line-height: 1.35; max-width: 260px; }
+.farm-econ { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.scatter { margin: var(--s2) 0; }
+.scatter svg { width: 100%; height: auto; display: block; }

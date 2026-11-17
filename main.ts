@@ -1,10 +1,11 @@
 // Token Radar's entry program (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// pre-token protocol with the radar-2 model in lib/model.ts, writes the ranked board to
+// pre-token protocol with the radar-4 model in lib/model.ts, writes the ranked board to
 // /output/board.json, and copies this repository's dashboard/ and screenshots/ to /output.
 // Last, it writes /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library.
+// make.fun library. The board is 198 rows: the 40 watchlist protocols, the 20 off-list
+// launch candidates above the floor, and the 138 largest pre-token protocols below it.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html,
 // dashboard/app.css and dashboard/app.js read /output/data.js, which this program writes
@@ -91,6 +92,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: board ${board.length} rows: ${radar.watchlist_size} watchlist, ${radar.offlist_size} off-list above the floor, ${board.length - radar.watchlist_size - radar.offlist_size} below it; set aside ${radar.disposition.tokened} tokened, ${radar.disposition.bridge} bridges, ${radar.disposition.lst} staking, ${radar.disposition.exchange} exchange, ${radar.disposition.versioned_wrapped} versioned/wrapped, ${radar.disposition.below_cut} below the cut\n` +
     `token radar: size curve on ${radar.fit.comps_n} comps: log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} x log10(TVL), R2 ${radar.fit.r2}, sigma ${radar.fit.sigma_dex} dex, band x${radar.fit.band_factor}\n` +
     `token radar: out-of-sample 5-fold x${radar.fit.oos_5fold_factor} (Spearman ${radar.fit.oos_5fold_spearman}), time-split x${radar.fit.timesplit_factor} (Spearman ${radar.fit.timesplit_spearman}); bootstrap slope ${radar.fit.bootstrap_slope_mean} +- ${radar.fit.bootstrap_slope_sd}\n` +
     `token radar: farm verdicts ${radar.fit.verdict_counts.farm} farm / ${radar.fit.verdict_counts.thin} thin / ${radar.fit.verdict_counts.skip} skip\n` +
